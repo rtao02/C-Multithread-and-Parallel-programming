@@ -1,0 +1,657 @@
+//HW2 by Rui Tao
+//SU Net ID: rtao02  SUID: 480953224
+//CIS600/CSE691  HW2
+//Due: 11:59PM, Friday(3/5)
+#include<iostream>
+#include<thread>
+#include<vector>
+#include<mutex>
+#include<chrono>
+#include <string>
+#include<ctime>
+#include<map>
+#include <cstdlib> 
+#include <fstream>
+
+using namespace std;
+mutex mutex_buffer;
+//mutex mutex_visit_buffer;
+condition_variable cv_partWorker, cv_productWorker;
+chrono::system_clock::time_point tbegin = chrono::system_clock::now();
+int total = 0;
+vector<int> temp;
+int partCnt = 0;
+int productCnt = 0;
+vector<int> buffer(4);//buffer's capaticy is A:6 B:5 C:3 D:2
+map<vector<int>, int> check_PartWorker;
+map<vector<int>, int> check_ProductWorker;
+int seed = time(0);
+ofstream myfile;
+
+
+bool PartLoadUncompelte(vector<int> order) {
+	int sum = 0;
+	for (auto i : order) {
+		sum += i;
+	}
+	if (sum == 0) return 0;
+	else return 1;
+}
+
+bool BufferIsValid_partWorker(vector<int> buffer, vector<int> thisOrder_partWorker) {
+	if (buffer[0] < 6 && thisOrder_partWorker[0] > 0 || buffer[1] < 5 && thisOrder_partWorker[1] > 0 || buffer[2] < 4 && thisOrder_partWorker[2] > 0 || buffer[3] < 3 && thisOrder_partWorker[3] > 0)return true;
+	else return false;
+}
+
+bool BufferIsValid_productWorker(vector<int> buffer, vector<int> thisOrder_productWorker) {//prototype
+	int ret = 1;
+	for (int i = 0; i < 4; i++) {
+		if (buffer[i] < thisOrder_productWorker[i]) ret = 0;
+	}
+	return ret;
+}
+
+bool getEnough(vector<int> thisOrder_productWorker) {
+	int sum = 0;
+	for (auto i : thisOrder_productWorker) {
+		sum += i;
+	}
+	if (sum == 0)return 1;
+	else return 0;
+}
+
+void PartWorker(vector<int>& buffer, int id) {
+	for (int iterations = 0; iterations < 5; iterations++) {//each worker do 5 iterations
+
+		//generate order for this work, meanwhile it is load order for this part worker
+		srand(seed++);
+
+		vector<int> thisOrder(4);
+		vector<int> strategy = { 0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,4 };
+		int chooseS = rand() % 35;
+		if (strategy[chooseS] == 0) {
+			int c = rand() % 4;
+			for (int i = 0; i < 4; i++) {
+				thisOrder[i] = 0;
+			}
+			thisOrder[c] = 4;
+		}
+		else if (strategy[chooseS] == 1) {
+			int f = rand() % 2;
+			int c1 = rand() % 4;
+			int c2;
+			do {
+				c2 = rand() % 4;
+			} while (c2 == c1);
+			for (int i = 0; i < 4; i++) {
+				thisOrder[i] = 0;
+			}
+			if (f == 0) {
+				thisOrder[c1] = 1;
+				thisOrder[c2] = 3;
+			}
+			else {
+				thisOrder[c1] = 3;
+				thisOrder[c2] = 1;
+			}
+		}
+		else if (strategy[chooseS] == 2) {
+			int c1 = rand() % 4;
+			int c2;
+			do {
+				c2 = rand() % 4;
+			} while (c2 == c1);
+			for (int i = 0; i < 4; i++) {
+				thisOrder[i] = 0;
+			}
+			thisOrder[c1] = 2;
+			thisOrder[c2] = 2;
+		}
+		else if (strategy[chooseS] == 3) {
+			int f = rand() % 2;
+			int c1 = rand() % 4;
+			int c2;
+			do {
+				c2 = rand() % 4;
+			} while (c2 == c1);
+			for (int i = 0; i < 4; i++) {
+				thisOrder[i] = 1;
+			}
+			if (f == 0) {
+				thisOrder[c1] = 0;
+				thisOrder[c2] = 2;
+			}
+			else {
+				thisOrder[c1] = 2;
+				thisOrder[c2] = 0;
+			}
+		}
+		else if (strategy[chooseS] == 4) {
+			for (int i = 0; i < 4; i++) {
+				thisOrder[i] = 1;
+			}
+		}
+		auto search = check_PartWorker.find(thisOrder);
+		if (search == check_PartWorker.end()) {
+			check_PartWorker.emplace(thisOrder, 1);
+		}
+		else {
+			(*search).second++;
+		}
+		//calculate the total time should be comsumed for this order in microsecond
+		int thisOrderTimeConsume = thisOrder[0] * 50 + thisOrder[1] * 70 + thisOrder[2] * 90 + thisOrder[3] * 110;
+		//move parts to buffer's area
+		int thisOrderMove = thisOrder[0] * 20 + thisOrder[1] * 30 + thisOrder[2] * 40 + thisOrder[3] * 50;
+		//make this order during this period
+		this_thread::sleep_for(chrono::microseconds(thisOrderTimeConsume + thisOrderMove));
+		//send parts to buffer area according to the load order
+		//Step 1: check if the buffer valid
+		if (BufferIsValid_partWorker(buffer, thisOrder)) {
+			{
+				//grab the mutex
+				unique_lock<mutex> lck_buffer(mutex_buffer);
+				chrono::system_clock::time_point partWaitBegin = chrono::system_clock::now();
+				while (productCnt < 2) {
+					chrono::system_clock::time_point partWaitEnd = chrono::system_clock::now();
+					chrono::system_clock::duration partElapse = partWaitEnd - partWaitBegin;
+					if (chrono::duration_cast<chrono::microseconds>(partElapse).count() > 1080) break;
+				}
+				/*if (cv_partWorker.wait_for(lck_buffer, chrono::microseconds(1080), PartWaitProduct())) {
+					goto lable2;
+				}
+				else {
+					goto lable2;
+				}*/
+			lable2:
+				chrono::system_clock::time_point tend = chrono::system_clock::now();
+				chrono::system_clock::duration elapse_PartWorker = tend - tbegin;
+				myfile << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_PartWorker).count() << "us" << endl;
+				myfile << "Part Worker ID: " << id << endl;
+				myfile << "Iteration: " << iterations << endl;
+				myfile << "Status: New Load Order" << endl;
+				myfile << "Accumulated Wait Time: 0us" << endl;
+				myfile << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				myfile << "Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+				cout << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_PartWorker).count() << "us" << endl;
+				cout << "Part Worker ID: " << id << endl;
+				cout << "Iteration: " << iterations << endl;
+				cout << "Status: New Load Order" << endl;
+				cout << "Accumulated Wait Time: 0us" << endl;
+				cout << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				cout << "Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+
+				//start load
+				vector<int> loadCnt(4);
+				vector<int> incrementOfBuffer(4);
+				loadCnt[0] = 6 - buffer[0];
+				loadCnt[1] = 5 - buffer[1];
+				loadCnt[2] = 4 - buffer[2];
+				loadCnt[3] = 3 - buffer[3];
+				for (int i = 0; i < 4; i++) {
+					if (thisOrder[i] <= loadCnt[i]) {
+						buffer[i] += thisOrder[i];
+						incrementOfBuffer[i] = thisOrder[i];
+						thisOrder[i] = 0;
+					}
+					else {
+						buffer[i] += loadCnt[i];
+						incrementOfBuffer[i] = loadCnt[i];
+						thisOrder[i] -= loadCnt[i];
+					}
+				}
+				myfile << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				myfile << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+				myfile << endl;
+				cout << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				cout << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+				cout << endl;
+				if (partCnt < 3) {
+					partCnt++;
+				}
+				else {
+					partCnt = 0;
+				}
+				if (partCnt == 3) {
+					cv_productWorker.notify_all();
+				}
+				cv_productWorker.notify_all();
+			}
+			//cv_productWorker.notify_all();
+			////calculate the time used for move part to buffer in millisecond
+			//int timeForLoad = 20 * incrementOfBuffer[0] + 30 * incrementOfBuffer[1] + 40 * incrementOfBuffer[2] + 50 * incrementOfBuffer[3];
+			//this_thread::sleep_for(chrono::microseconds(timeForLoad));
+			//we need check current part be held by this part worker after one time loading or zero time loading
+			if (PartLoadUncompelte(thisOrder)) {//only when this order load uncomplete, then wait near the buffer area
+			lable1:
+				unique_lock<mutex> lck_buffer(mutex_buffer);
+				vector<int> loadCnt(4);
+				vector<int> incrementOfBuffer(4);
+				chrono::system_clock::time_point waitBegin = chrono::system_clock::now();
+				if (cv_partWorker.wait_until(lck_buffer, chrono::steady_clock::now() + chrono::microseconds(3000), [buffer, thisOrder]() {
+					if ((buffer[0] < 6 && thisOrder[0] > 0) || (buffer[1] < 5 && thisOrder[1] > 0) || (buffer[2] < 4 && thisOrder[2] > 0) || (buffer[3] < 3 && thisOrder[3] > 0))return true;
+					else return false;
+					})) {//keep load to buffer
+
+					chrono::system_clock::time_point partWaitBegin = chrono::system_clock::now();
+					while (productCnt < 2) {
+						chrono::system_clock::time_point partWaitEnd = chrono::system_clock::now();
+						chrono::system_clock::duration partElapse = partWaitEnd - partWaitBegin;
+						if (chrono::duration_cast<chrono::microseconds>(partElapse).count() > 1920) break;
+					}
+
+					chrono::system_clock::time_point tend = chrono::system_clock::now();
+					chrono::system_clock::duration elapse_PartWorker = tend - tbegin;
+					myfile << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_PartWorker).count() << "us" << endl;
+					myfile << "Part Worker ID: " << id << endl;
+					myfile << "Iteration: " << iterations << endl;
+					myfile << "Status: Wakeup_Notified" << endl;
+					cout << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_PartWorker).count() << "us" << endl;
+					cout << "Part Worker ID: " << id << endl;
+					cout << "Iteration: " << iterations << endl;
+					cout << "Status: Wakeup_Notified" << endl;
+					chrono::system_clock::duration elapseWait = tend - waitBegin;
+					myfile << "Accumulated Wait Time: " << chrono::duration_cast<chrono::microseconds>(elapseWait).count() << "us" << endl;
+					myfile << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << "," << ")" << endl;
+					myfile << "Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+					cout << "Accumulated Wait Time: " << chrono::duration_cast<chrono::microseconds>(elapseWait).count() << "us" << endl;
+					cout << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+					cout << "Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+					loadCnt[0] = (6 - buffer[0]);
+					loadCnt[1] = (5 - buffer[1]);
+					loadCnt[2] = (4 - buffer[2]);
+					loadCnt[3] = (3 - buffer[3]);
+					for (int i = 0; i < 4; i++) {
+						if (thisOrder[i] <= loadCnt[i]) {
+							buffer[i] += thisOrder[i];
+							incrementOfBuffer[i] = (thisOrder[i]);
+							thisOrder[i] = 0;
+						}
+						else {
+							buffer[i] += loadCnt[i];
+							incrementOfBuffer[i] = (loadCnt[i]);
+							thisOrder[i] -= loadCnt[i];
+						}
+					}
+					myfile << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+					myfile << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+					myfile << endl;
+					cout << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+					cout << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+					cout << endl;
+					if (partCnt < 3) {
+						partCnt++;
+					}
+					else {
+						partCnt = 0;
+					}
+					if (partCnt == 3) {
+						cv_productWorker.notify_all();
+					}
+					cv_productWorker.notify_all();
+					lck_buffer.unlock();
+					//cv_productWorker.notify_all();
+					/*int timeForLoad2 = 20 * incrementOfBuffer[0] + 30 * incrementOfBuffer[1] + 40 * incrementOfBuffer[2] + 50 * incrementOfBuffer[3];
+					this_thread::sleep_for(chrono::microseconds(timeForLoad2));*/
+				}
+				else {//discard handy parts
+					//unique_lock<mutex> lck_buffer(mutex_buffer);
+					chrono::system_clock::time_point tend = chrono::system_clock::now();
+					chrono::system_clock::duration elapse_PartWorker = tend - tbegin;
+					myfile << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_PartWorker).count() << "us" <<  endl;
+					myfile << "Part Worker ID: " << id << endl;
+					myfile << "Iteration: " << iterations << endl;
+					myfile << "Status: Waitup-Timeout" << endl;
+					cout << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_PartWorker).count() << "us" << endl;
+					cout << "Part Worker ID: " << id << endl;
+					cout << "Iteration: " << iterations << endl;
+					cout << "Status: Waitup-Timeout" << endl;
+					chrono::system_clock::duration elapseWait = tend - waitBegin;
+					myfile << "Accumulated Wait Time: " << chrono::duration_cast<chrono::microseconds>(elapseWait).count() << "us" << endl;
+					myfile << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+					myfile << "Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+					cout << "Accumulated Wait Time: " << chrono::duration_cast<chrono::microseconds>(elapseWait).count() << "us" << endl;
+					cout << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+					cout << "Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+					int timeForDiscard = 20 * thisOrder[0] + 30 * thisOrder[1] + 40 * thisOrder[2] + 50 * thisOrder[3];
+					this_thread::sleep_for(chrono::microseconds(timeForDiscard));
+					for (int i = 0; i < 4; i++) {
+						thisOrder[i] = 0;
+					}
+					myfile << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+					myfile << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+					myfile << endl;
+					cout << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+					cout << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+					cout << endl;
+				}
+			}
+		}
+		else {
+			goto lable1;
+		}
+	}
+}
+
+void ProductWorker(vector<int>& buffer, int id) {
+	for (int m = 0; m < 5; m++) {
+
+		this_thread::sleep_for(chrono::microseconds(10000));
+		//generate assembly order for this product worker
+		srand(seed++);
+		vector<int> thisOrder = { 0,0,0,0 };
+		int chooseS = rand() % 2;
+		if (chooseS == 0) {
+			int f = rand() % 2;
+			int c1 = rand() % 4;
+			int c2;
+			do {
+				c2 = rand() % 4;
+			} while (c2 == c1);
+			for (int i = 0; i < 4; i++) {
+				thisOrder[i] = 1;
+			}
+			if (f == 0) {
+				thisOrder[c1] = 0;
+				thisOrder[c2] = 3;
+			}
+			else {
+				thisOrder[c1] = 3;
+				thisOrder[c2] = 0;
+			}
+		}
+		else if (chooseS == 1) {
+			int f = rand() % 2;
+			int c1 = rand() % 4;
+			int c2;
+			do {
+				c2 = rand() % 4;
+			} while (c2 == c1);
+			for (int i = 0; i < 4; i++) {
+				thisOrder[i] = 2;
+			}
+			if (f == 0) {
+				thisOrder[c1] = 0;
+				thisOrder[c2] = 1;
+			}
+			else {
+				thisOrder[c1] = 1;
+				thisOrder[c2] = 0;
+			}
+		}
+		auto search = check_ProductWorker.find(thisOrder);
+		if (search == check_ProductWorker.end()) {
+			check_ProductWorker.emplace(thisOrder, 1);
+		}
+		else {
+			(*search).second++;
+		}
+		/*while (partCnt != 3) {
+			do nothing just wait
+		}*/
+		vector<int> takeCnt(4);
+		{
+			unique_lock<mutex> lck_buffer(mutex_buffer);
+
+			chrono::system_clock::time_point productWaitBegin = chrono::system_clock::now();
+			while (partCnt < 3) {
+				chrono::system_clock::time_point productWaitEnd = chrono::system_clock::now();
+				chrono::system_clock::duration productElapse = productWaitEnd - productWaitBegin;
+				if (chrono::duration_cast<chrono::microseconds>(productElapse).count() > 1920) break;
+			}
+		lable3:
+			chrono::system_clock::time_point tend = chrono::system_clock::now();
+			chrono::system_clock::duration elapse_ProductWorker = tend - tbegin;
+			myfile << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_ProductWorker).count() << "us" << endl;
+			myfile << "Product Worker ID: " << id << endl;
+			myfile << "Iteration: " << m << endl;
+			myfile << "Status: New Pickup Order" << endl;
+			myfile << "Accumulated Wait Time: 0us" << endl;
+			myfile << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+			myfile << "Pickup Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+			cout << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_ProductWorker).count() << "us" << endl;
+			cout << "Product Worker ID: " << id << endl;
+			cout << "Iteration: " << m << endl;
+			cout << "Status: New Pickup Order" << endl;
+			cout << "Accumulated Wait Time: 0us" << endl;
+			cout << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+			cout << "Pickup Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+
+			//product worker get parts from buffer
+			//vector<int> takeCnt(4);
+			for (int i = 0; i < 4; i++) {//buffer storage of this part(A/B/C/D) is enough for thiS order
+				if (buffer[i] - thisOrder[i] >= 0) {
+					buffer[i] -= thisOrder[i];
+					takeCnt[i] = thisOrder[i];
+					thisOrder[i] = 0;
+				}
+				else {//not enought
+					thisOrder[i] -= buffer[i];
+					takeCnt[i] = buffer[i];
+					buffer[i] = 0;
+				}
+			}
+			myfile << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+			myfile << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+			cout << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+			cout << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+			//lck_buffer.unlock();
+			if (getEnough(thisOrder)) {//start assemble product
+				total++;
+				temp.push_back(total);
+				myfile << "Total Completed Products: " << total << endl;
+				myfile << endl;
+				cout << "Total Completed Products: " << total << endl;
+				cout << endl;
+				cv_partWorker.notify_all();
+				lck_buffer.unlock();
+				cv_partWorker.notify_all();
+				//take parts from buffer area to assembly area
+				int getPartTime = 20 * takeCnt[0] + 30 * takeCnt[1] + 40 * takeCnt[2] + 50 * takeCnt[3];//in microseconds
+				this_thread::sleep_for(chrono::microseconds(getPartTime));
+				//assembly 
+				int assemblyProductTime = 80 * takeCnt[0] + 100 * takeCnt[1] + 120 * takeCnt[2] + 140 * takeCnt[3];//in microseconds
+				this_thread::sleep_for(chrono::microseconds(assemblyProductTime));
+
+				if (productCnt < 2) {
+					productCnt++;
+				}
+				else {
+					productCnt = 0;
+				}
+				if (productCnt == 2) {
+					cv_partWorker.notify_all();
+				}
+				continue;
+			}
+			else {
+				myfile << "Total Completed Products: " << total << endl;
+				myfile << endl;
+				cout << "Total Completed Products: " << total << endl;
+				cout << endl;
+			}
+		}
+		/*cv_partWorker.notify_all();*/
+		//if (getEnough(thisOrder)) {//start assemble product
+		//	//take parts from buffer area to assembly area
+		//	int getPartTime = 20 * takeCnt[0] + 30 * takeCnt[1] + 40 * takeCnt[2] + 50 * takeCnt[3];//in microseconds
+		//	this_thread::sleep_for(chrono::microseconds(getPartTime));
+		//	//assembly 
+		//	int assemblyProductTime = 80 * takeCnt[0] + 100 * takeCnt[1] + 120 * takeCnt[2] + 140 * takeCnt[3];//in microseconds
+		//	this_thread::sleep_for(chrono::microseconds(assemblyProductTime));
+		//	total++;
+		//	myfile << "Total Completed Products: " << total << endl;
+		//	myfile << endl;
+		//}
+		if (!getEnough(thisOrder)) {
+			//while (partCnt != 3) {
+			//	//do nothing just wait
+			//}
+			unique_lock<mutex> lck_buffer(mutex_buffer);
+			chrono::system_clock::time_point waitBegin = chrono::system_clock::now();
+			//if (cv_productWorker.wait_until(lck_buffer, chrono::steady_clock::now() + chrono::microseconds(6000), BufferIsValid_productWorker(buffer, thisOrder))) {
+			if (cv_productWorker.wait_until(lck_buffer, chrono::steady_clock::now() + chrono::microseconds(6000), [buffer, thisOrder]() {
+				int ret = 1;
+				for (int i = 0; i < 4; i++) {
+					if (buffer[i] < thisOrder[i]) ret = 0;
+				}
+				return ret;
+				})) {
+
+				chrono::system_clock::time_point productWaitBegin = chrono::system_clock::now();
+				while (partCnt < 3) {
+					chrono::system_clock::time_point productWaitEnd = chrono::system_clock::now();
+					chrono::system_clock::duration productElapse = productWaitEnd - productWaitBegin;
+					if (chrono::duration_cast<chrono::microseconds>(productElapse).count() > 1920) break;
+				}
+
+				chrono::system_clock::time_point tend = chrono::system_clock::now();
+				chrono::system_clock::duration elapse_ProductWorker = tend - tbegin;
+				myfile << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_ProductWorker).count() << "us" << endl;
+				myfile << "Product Worker ID: " << id << endl;
+				myfile << "Iteration: " << m << endl;
+				myfile << "Status: Wakeup-Notified" << endl;
+				cout << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_ProductWorker).count() << "us" << endl;
+				cout << "Product Worker ID: " << id << endl;
+				cout << "Iteration: " << m << endl;
+				cout << "Status: Wakeup-Notified" << endl;
+				chrono::system_clock::duration elapseWait = tend - waitBegin;
+				myfile << "Accumulated Wait Time: " << chrono::duration_cast<chrono::microseconds>(elapseWait).count() << "us" << endl;
+				myfile << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				myfile << "Pickup Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+				cout << "Accumulated Wait Time: " << chrono::duration_cast<chrono::microseconds>(elapseWait).count() << "us" << endl;
+				cout << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				cout << "Pickup Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+				for (int i = 0; i < 4; i++) {//buffer storage could fullfill all parts requirement of this order
+					buffer[i] -= thisOrder[i];
+					takeCnt[i] = thisOrder[i];
+					thisOrder[i] = 0;
+				}
+				myfile << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				myfile << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+				cout << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				cout << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+				total++;
+				temp.push_back(total);
+				myfile << "Total Completed Products: " << total << endl;
+				myfile << endl;
+				cout << "Total Completed Products: " << total << endl;
+				cout << endl;
+
+				if (productCnt < 2) {
+					productCnt++;
+				}
+				else {
+					productCnt = 0;
+				}
+				if (productCnt == 2) {
+					cv_partWorker.notify_all();
+				}
+
+				cv_partWorker.notify_all();
+				lck_buffer.unlock();
+				cv_partWorker.notify_all();
+				//finish assembly
+				//take parts from buffer area to assembly area
+				int getPartTime = 20 * takeCnt[0] + 30 * takeCnt[1] + 40 * takeCnt[2] + 50 * takeCnt[3];//in microseconds
+				this_thread::sleep_for(chrono::microseconds(getPartTime));
+				//assembly 
+				int assemblyProductTime = 80 * takeCnt[0] + 100 * takeCnt[1] + 120 * takeCnt[2] + 140 * takeCnt[3];//in microseconds
+				this_thread::sleep_for(chrono::microseconds(assemblyProductTime));
+			}
+			else {//discard
+				//unique_lock<mutex> lck_buffer(mutex_buffer);
+				chrono::system_clock::time_point tend = chrono::system_clock::now();
+				chrono::system_clock::duration elapse_ProductWorker = tend - tbegin;
+				myfile << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_ProductWorker).count() << "us" << endl;
+				myfile << "Product Worker ID: " << id << endl;
+				myfile << "Iteration: " << m << endl;
+				myfile << "Status: Wakeup-Timeout" << endl;
+				cout << "Current Time: " << chrono::duration_cast<chrono::microseconds>(elapse_ProductWorker).count() << "us" << endl;
+				cout << "Product Worker ID: " << id << endl;
+				cout << "Iteration: " << m << endl;
+				cout << "Status: Wakeup-Timeout" << endl;
+				chrono::system_clock::duration elapseWait = tend - waitBegin;
+				myfile << "Accumulated Wait Time: " << chrono::duration_cast<chrono::microseconds>(elapseWait).count() << "us" << endl;
+				myfile << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				myfile << "Pickup Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+				myfile << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				myfile << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+				cout << "Accumulated Wait Time: " << chrono::duration_cast<chrono::microseconds>(elapseWait).count() << "us" << endl;
+				cout << "Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				cout << "Pickup Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+				cout << "Updated Buffer State: " << "(" << buffer[0] << "," << buffer[1] << "," << buffer[2] << "," << buffer[3] << ")" << endl;
+				cout << "Updated Load Order: " << "(" << thisOrder[0] << "," << thisOrder[1] << "," << thisOrder[2] << "," << thisOrder[3] << ")" << endl;
+
+				int discardPartTime = 20 * takeCnt[0] + 30 * takeCnt[1] + 40 * takeCnt[2] + 50 * takeCnt[3];//in microseconds
+				this_thread::sleep_for(chrono::microseconds(discardPartTime));
+				myfile << "Total Completed Products: " << total << endl;
+				myfile << endl;
+				cout << "Total Completed Products: " << total << endl;
+				cout << endl;
+			}
+		}
+	}
+}
+
+
+int main() {
+	srand(seed++);
+	const int m = 20, n = 16; //m: number of Part Workers
+	//n: number of Product Workers
+	//m>n
+
+	myfile.open("result.txt");
+
+	thread partW[m];
+	thread prodW[n];
+	for (int i = 0; i < n; i++) {
+		partW[i] = thread(PartWorker, ref(buffer), i);
+		//srand(time(0));
+		this_thread::sleep_for(chrono::microseconds(rand() % 50));
+		prodW[i] = thread(ProductWorker, ref(buffer), i);
+		//srand(time(0));
+		this_thread::sleep_for(chrono::microseconds(rand() % 50));
+	}
+	for (int i = n; i < m; i++) {
+		partW[i] = thread(PartWorker, ref(buffer), i);
+		//srand(time(0));
+		this_thread::sleep_for(chrono::microseconds(rand() % 50));
+	}
+	/* Join the threads to the main threads */
+	for (int i = 0; i < n; i++) {
+		partW[i].join();
+		prodW[i].join();
+	}
+	for (int i = n; i < m; i++) {
+		partW[i].join();
+	}
+	myfile.close();
+	cout << "Total: " << total << endl;
+	/*for (auto i : temp) {
+		cout << i << " ";
+	}
+	cout << endl;*/
+	
+	cout << "Part Orders' frequency: " << endl;
+	for (auto i : check_PartWorker) {
+		for (auto j : i.first) {
+			cout << j << " ";
+		}
+		cout << "Times: " << i.second;
+		cout << endl;
+	}
+	cout << "Product Orders' frequency: " << endl;
+	for (auto i : check_ProductWorker) {
+		for (auto j : i.first) {
+			cout << j << " ";
+		}
+		cout << "Times: " << i.second;
+		cout << endl;
+	}
+	cout << "Finish!" << endl;
+	cout << endl;
+	cout << "===============================================================================" << endl;
+	cout << "I found the time consumed in 'cout' could improve the whole work's efficiency. " << endl << "But I didn't find a good way to calculate each cout block's time elapse, " << endl << "Then I both write to log and print in console.";
+	cout << endl << endl << endl;
+	return 0;
+}
